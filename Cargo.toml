@@ -1,0 +1,19 @@
+[package]
+name = "cga"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+wavefront_obj = "10.0.0"
+obj-rs = { version = "0.7.1", features = ["glium"] }
+egui = "0.25.0"
+serde = "1.0.196"
+eframe = { version = "0.25.0", default-features = false, features = [
+    "accesskit",     # Make egui comptaible with screen readers. NOTE: adds a lot of dependencies.
+    "default_fonts", # Embed the default egui fonts.
+    "glow",          # Use the glow rendering backend. Alternative: "wgpu".
+    "persistence",   # Enable restoring app state when restarting the app.
+] }
+
