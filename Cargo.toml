@@ -16,4 +16,6 @@ eframe = { version = "0.25.0", default-features = false, features = [
     "glow",          # Use the glow rendering backend. Alternative: "wgpu".
     "persistence",   # Enable restoring app state when restarting the app.
 ] }
+nalgebra-glm = "0.18.0"
+nalgebra = "0.32.4"
 

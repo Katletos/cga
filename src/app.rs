@@ -1,41 +1,39 @@
+use crate::bresenham::{Bresenham, Point};
+use egui::{
+    epaint::ImageDelta, include_image, pos2, vec2, Color32, ColorImage, Direction, Frame, Image,
+    Margin, Rect, Sense, TextureId, TextureOptions, Vec2,
+};
+use nalgebra::{Matrix4, Point3, Vector3};
+use nalgebra_glm;
+use nalgebra_glm::Vec3;
+use obj::Obj;
+use std::vec;
+
 /// We derive Deserialize/Serialize so we can persist app state on shutdown.
 #[derive(serde::Deserialize, serde::Serialize)]
-#[serde(default)] // if we add new fields, give them default values when deserializing old state
-pub struct TemplateApp {
-    // Example stuff:
-    label: String,
-
-    #[serde(skip)] // This how you opt-out of serialization of a field
-    value: f32,
+//#[serde(default)] // if we add new fields, give them default values when deserializing old state
+pub struct DickDrawingApp {
+    texture: TextureId,
+    obj: Obj,
 }
 
-impl Default for TemplateApp {
-    fn default() -> Self {
-        Self {
-            // Example stuff:
-            label: "Hello World!".to_owned(),
-            value: 2.7,
-        }
-    }
-}
-
-impl TemplateApp {
+impl DickDrawingApp {
     /// Called once before the first frame.
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, obj: Obj) -> Self {
         // This is also where you can customize the look and feel of egui using
         // `cc.egui_ctx.set_visuals` and `cc.egui_ctx.set_fonts`.
 
-        // Load previous app state (if any).
-        // Note that you must enable the `persistence` feature for this to work.
-        if let Some(storage) = cc.storage {
-            return eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default();
-        }
+        let texture = cc.egui_ctx.tex_manager().write().alloc(
+            "app".parse().unwrap(),
+            ColorImage::default().into(),
+            TextureOptions::NEAREST,
+        );
 
-        Default::default()
+        Self { texture, obj }
     }
 }
 
-impl eframe::App for TemplateApp {
+impl eframe::App for DickDrawingApp {
     /// Called by the frame work to save state before shutdown.
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, eframe::APP_KEY, self);
@@ -43,67 +41,51 @@ impl eframe::App for TemplateApp {
 
     /// Called each time the UI needs repainting, which may be many times per second.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Put your widgets into a `SidePanel`, `TopBottomPanel`, `CentralPanel`, `Window` or `Area`.
-        // For inspiration and more examples, go to https://emilk.github.io/egui
+        egui::CentralPanel::default()
+            .frame(Frame::none())
+            .show(ctx, |ui| {
+                let eye = Point3::<f32>::new(0.0, 0.0, 0.0);
+                let target = Point3::<f32>::new(1.0, 1.0, 1.0);
+                let up = Vector3::<f32>::new(0.0, 0.0, 1.0);
+                let look_at = Matrix4::face_towards(&eye, &target, &up);
 
-        egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
-            // The top panel is often a good place for a menu bar:
+                let mut point_in_view_space = Vec::with_capacity(self.obj.vertices.len());
+                for vertex in self.obj.vertices.to_vec() {
+                    let a = look_at.transform_vector(&Vector3::from(vertex.normal));
+                    point_in_view_space.push(a);
+                }
+                dbg!(point_in_view_space);
 
-            egui::menu::bar(ui, |ui| {
-                // NOTE: no File->Quit on web pages!
-                let is_web = cfg!(target_arch = "wasm32");
-                if !is_web {
-                    ui.menu_button("File", |ui| {
-                        if ui.button("Quit").clicked() {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        }
-                    });
-                    ui.add_space(16.0);
+                let w = ui.clip_rect().width() as usize;
+                let h = ui.clip_rect().height() as usize;
+                let wh = [w, h];
+                let mut image = ColorImage::new(wh, Color32::YELLOW);
+                let mut cursor_x = 0.0;
+                let mut cursor_y = 0.0;
+
+                if let Some(pos) = ui.input(|x| x.pointer.hover_pos()) {
+                    cursor_x = pos.x;
+                    cursor_y = pos.y;
                 }
 
-                egui::widgets::global_dark_light_mode_buttons(ui);
+                for (x, y) in Bresenham::new((0, 0), (cursor_x as isize, cursor_y as isize)) {
+                    image.pixels[w * y as usize + x as usize] = Color32::BLACK;
+                }
+
+                ui.ctx().tex_manager().write().set(
+                    self.texture,
+                    ImageDelta::full(image, TextureOptions::NEAREST),
+                );
+
+                let (response, painter) =
+                    ui.allocate_painter(ui.ctx().screen_rect().size(), Sense::drag());
+                painter.image(
+                    self.texture,
+                    painter.clip_rect(),
+                    Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                    Color32::WHITE,
+                );
             });
-        });
-
-        egui::CentralPanel::default().show(ctx, |ui| {
-            // The central panel the region left after adding TopPanel's and SidePanel's
-            ui.heading("eframe template");
-
-            ui.horizontal(|ui| {
-                ui.label("Write something: ");
-                ui.text_edit_singleline(&mut self.label);
-            });
-
-            ui.add(egui::Slider::new(&mut self.value, 0.0..=10.0).text("value"));
-            if ui.button("Increment").clicked() {
-                self.value += 1.0;
-            }
-
-            ui.separator();
-
-            ui.add(egui::github_link_file!(
-                "https://github.com/emilk/eframe_template/blob/master/",
-                "Source code."
-            ));
-
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                powered_by_egui_and_eframe(ui);
-                egui::warn_if_debug_build(ui);
-            });
-        });
+        dbg!("asdasdadsa");
     }
-}
-
-fn powered_by_egui_and_eframe(ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        ui.label("Powered by ");
-        ui.hyperlink_to("egui", "https://github.com/emilk/egui");
-        ui.label(" and ");
-        ui.hyperlink_to(
-            "eframe",
-            "https://github.com/emilk/egui/tree/master/crates/eframe",
-        );
-        ui.label(".");
-    });
 }
