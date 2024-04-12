@@ -46,6 +46,8 @@ pub struct DickDrawingApp {
     normals_buf: Vec<Vector3<f32>>,
     prev_light: Vector3<f32>,
     light: Vector3<f32>,
+    pos: Point3<f32>,
+    pos_limit: f32,
 }
 
 impl DickDrawingApp {
@@ -136,6 +138,9 @@ impl DickDrawingApp {
         }
 
         DickDrawingApp {
+            pos: Point3::new(0.0, 0.0, 0.0),
+            pos_limit: 100.0,
+
             triangle_colors,
             texture,
             //obj: Some(obj),
@@ -177,10 +182,14 @@ impl eframe::App for DickDrawingApp {
                 let w = ui.clip_rect().width() as usize;
                 let h = ui.clip_rect().height() as usize;
 
-                let wh = [w, h];
+                let (response, painter) =
+                    ui.allocate_painter(ui.ctx().screen_rect().size(), Sense::drag());
+
+                let wh = [painter.clip_rect().width() as usize, painter.clip_rect().height() as usize];
                 dbg!(wh);
 
-                let camera = Camera::new(self.distance, self.angle.to_radians(), self.height);
+                let camera = Camera::new(self.pos, self.distance, self.angle.to_radians(), self.height);
+
                 let far = 10.0;
                 let near = far / 100.0;
                 let perspective = Perspective3::new(w as f32/ h as f32, 60.0f32.to_radians(), 1.0, 1000.0);
@@ -286,12 +295,18 @@ impl eframe::App for DickDrawingApp {
                     cursor_x = pos.x;
                     cursor_y = pos.y;
                 }
+
                 dbg!("Triangle render", start.elapsed());
 
                 egui::Window::new("Settings").show(ctx, |ui| {
-                    ui.add(egui::Slider::new(&mut self.distance, 0.0..=10000.0).text("Distance"));
+                    ui.add(egui::Slider::new(&mut self.distance, 0.0..=10.0).text("Distance"));
                     ui.add(egui::Slider::new(&mut self.angle, 0.0..=360.0).text("Angle"));
-                    ui.add(egui::Slider::new(&mut self.height, -1000.0..=1000.0).text("Height"));
+                    ui.add(egui::Slider::new(&mut self.height, -10.0..=10.0).text("Height"));
+
+                    ui.add(egui::Slider::new(&mut self.pos_limit, 10.0..=1000.0).text("Pos Limit"));
+                    ui.add(egui::Slider::new(&mut self.pos.x, -self.pos_limit..=self.pos_limit).text("Pos X"));
+                    ui.add(egui::Slider::new(&mut self.pos.y, -self.pos_limit..=self.pos_limit).text("Pos Y"));
+                    ui.add(egui::Slider::new(&mut self.pos.z, -self.pos_limit..=self.pos_limit).text("Pos Z"));
 
                     if ui
                         .button(format!("Rasterize: {}", self.rasterize))
@@ -310,9 +325,7 @@ impl eframe::App for DickDrawingApp {
                     ImageDelta::full(image, TextureOptions::LINEAR),
                 );
 
-                let (response, painter) =
-                    ui.allocate_painter(ui.ctx().screen_rect().size(), Sense::drag());
-
+                dbg!(painter.clip_rect());
                 painter.image(
                     self.texture,
                     painter.clip_rect(),

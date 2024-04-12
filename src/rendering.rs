@@ -9,12 +9,11 @@ pub struct Camera {
 }
 
 impl Camera {
-    pub fn new(distance: f32, angle: f32, height: f32) -> Self {
+    pub fn new(eye: Point3<f32>, distance: f32, angle: f32, height: f32) -> Self {
         let x = angle.sin() * distance;
         let y = angle.cos() * distance;
-        let eye = Point3::new(x, height, y);
+        let target = eye + Vector3::new(x, height, y);;
 
-        let target = Point3::new(0.0, 0.0, 0.0);
         let up = Vector3::new(0.0, -1.0, 0.0);
         Camera {
             eye,
