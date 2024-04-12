@@ -92,22 +92,27 @@ impl DickDrawingApp {
                 itertools::EitherOrBoth::Both(v, n) => {
                     let vertex = v;
                     let normal = *n;
-                    model_points.push(Vertex::new(Point3::from(*vertex), Vector3::from(normal), Color32::BLACK));
-                },
+                    model_points.push(Vertex::new(
+                        Point3::from(*vertex),
+                        Vector3::from(normal),
+                        Color32::BLACK,
+                    ));
+                }
                 itertools::EitherOrBoth::Left(v) => {
                     let vertex = v;
                     let normal = [0.0; 3];
-                    model_points.push(Vertex::new(Point3::from(*vertex), Vector3::from(normal), Color32::BLACK));
-                },
-                itertools::EitherOrBoth::Right(_) => {
-
-                },
+                    model_points.push(Vertex::new(
+                        Point3::from(*vertex),
+                        Vector3::from(normal),
+                        Color32::BLACK,
+                    ));
+                }
+                itertools::EitherOrBoth::Right(_) => {}
             }
         }
 
         let mut model_triangles = Vec::new();
         let mut triangle_colors = Vec::new();
-
 
         for [a, b, c] in model.triangles() {
             let (a, b, c) = (a.position_index(), b.position_index(), c.position_index());
@@ -119,7 +124,8 @@ impl DickDrawingApp {
             let (a, b, c) = (
                 model_points[*a].camera_view,
                 model_points[*b].camera_view,
-                model_points[*c].camera_view);
+                model_points[*c].camera_view,
+            );
             let ab = b - a;
             let ac = c - a;
             let normal = ab.cross(&ac).normalize();
@@ -168,15 +174,24 @@ impl eframe::App for DickDrawingApp {
         egui::CentralPanel::default()
             .frame(Frame::none())
             .show(ctx, |ui| {
+                let w = ui.clip_rect().width() as usize;
+                let h = ui.clip_rect().height() as usize;
+
+                let wh = [w, h];
+                dbg!(wh);
+
                 let camera = Camera::new(self.distance, self.angle.to_radians(), self.height);
                 let far = 10.0;
                 let near = far / 100.0;
-                let perspective = Perspective3::new(16.0 / 9.0, 60.0f32.to_radians(), 1.0, 1000.0);
+                let perspective = Perspective3::new(w as f32/ h as f32, 60.0f32.to_radians(), 1.0, 1000.0);
 
                 let start = Instant::now();
                 self.points_buf.clear();
                 self.normals_buf.clear();
-                let model = Isometry3::new(Vector3::new(0.0, 0.0, 0.0), Vector3::y() * std::f32::consts::FRAC_2_PI);
+                let model = Isometry3::new(
+                    Vector3::new(0.0, 0.0, 0.0),
+                    Vector3::y() * std::f32::consts::FRAC_2_PI,
+                );
                 let model_view_projection = camera.look_at2 * model;
 
                 for vertex in &self.model_points {
@@ -184,20 +199,24 @@ impl eframe::App for DickDrawingApp {
                     //self.points_buf.push(perspective.unproject_point(&a));
                     let point = vertex.camera_view;
                     let normal = vertex.norm;
-                    let to_push = perspective.unproject_point(&model_view_projection.transform_point(&point));
+                    let to_push =
+                        perspective.unproject_point(&model_view_projection.transform_point(&point));
                     let to_push_normal = model * normal;
                     self.points_buf.push(to_push);
                     self.normals_buf.push(to_push_normal);
                 }
 
                 if self.prev_light != self.light {
+                    self.light = self.light.normalize();
                     self.prev_light = self.light;
+
                     self.triangle_colors.clear();
                     for (a, b, c) in &self.model_triangles {
                         let (a, b, c) = (
                             self.model_points[*a].camera_view,
                             self.model_points[*b].camera_view,
-                            self.model_points[*c].camera_view);
+                            self.model_points[*c].camera_view,
+                        );
                         let ab = b - a;
                         let ac = c - a;
                         let normal = ab.cross(&ac).normalize();
@@ -207,14 +226,7 @@ impl eframe::App for DickDrawingApp {
                     }
                 }
 
-
                 dbg!("Point transform", start.elapsed());
-                let w = ui.clip_rect().width() as usize;
-                let h = ui.clip_rect().height() as usize;
-
-                let wh = [w, h];
-                dbg!(wh);
-
                 let mut image = ColorImage::new(wh, Color32::BLACK);
                 let mut image2 = ColorImage::new(wh, Color32::BLACK);
                 self.depth_buffer.fill(f32::INFINITY);
@@ -293,7 +305,6 @@ impl eframe::App for DickDrawingApp {
                     ui.add(egui::Slider::new(&mut self.light.z, -1.0..=1.0).text("Light Z"));
                 });
 
-
                 ui.ctx().tex_manager().write().set(
                     self.texture,
                     ImageDelta::full(image, TextureOptions::LINEAR),
@@ -344,9 +355,19 @@ fn process_model(
         }
 
         let is_valid = |point: &Point3<f32>| {
+            //(-1.0..1.0).contains(&point.x)
+            //   && (-1.0..1.0).contains(&point.y)
+            (-1.0..0.0).contains(&point.z)
+        };
+
+        let in_bounds = |point: &Point3<f32>| {
             (-1.0..1.0).contains(&point.x)
                 && (-1.0..1.0).contains(&point.y)
                 && (-1.0..0.0).contains(&point.z)
+        };
+
+        let is_visible_triangle = |p1: &Point3<f32>, p2: &Point3<f32>, p3: &Point3<f32>| {
+            in_bounds(p1) || in_bounds(p2) || in_bounds(p3)
         };
 
         let convert = |point: &Point3<f32>| {
@@ -363,32 +384,37 @@ fn process_model(
             )
         };
 
-        if is_valid(a) && is_valid(b) && is_valid(c) {
+        if is_visible_triangle(a, b, c) {
             let vertex_a = Vertex::new(convertf32(a), *na, Color32::RED);
             let vertex_b = Vertex::new(convertf32(b), *nb, Color32::BLUE);
             let vertex_c = Vertex::new(convertf32(c), *nc, Color32::GREEN);
-            let face_normal = (na + nb + nc).normalize();
+            //let face_normal = (na + nb + nc).normalize();
             let triangle_color = triangle_colors[i];
 
             rasterize_triangle(vertex_a, vertex_b, vertex_c, &mut |point, rgb, depth| {
                 let x = point.x;
                 let y = point.y;
                 if (0..w).contains(&x) && (0..h).contains(&y) {
-                    /*let color = Color32::from_rgb(
+                    let color = Color32::from_rgb(
                         (rgb.0 * 255.0) as u8,
                         (rgb.1 * 255.0) as u8,
                         (rgb.2 * 255.0) as u8,
-                    );*/
-                    //let color = triangle_color;
-                    //let mut normal = Vector3::new(rgb.0, rgb.1, rgb.2);
+                    );
+                    let color = triangle_color;
+                    let mut normal = Vector3::new(rgb.0, rgb.1, rgb.2);
 
-                    //let amount_of_light = face_normal.dot(&light);
-                    //let color = Color32::from_gray((amount_of_light * 255.0) as u8);
+                    let amount_of_light = normal.dot(&light);
+                    let color = Color32::from_gray((amount_of_light * 255.0) as u8);
+                    let triangle_color = color;
 
                     if depth_buffer[w * y as usize + x as usize] > depth {
                         unsafe {
-                            *image.pixels.get_unchecked_mut(w * y as usize + x as usize) = triangle_color;
-                            *depth_buffer.get_unchecked_mut(w * y as usize + x as usize) = depth;
+                            //*image.pixels.get_unchecked_mut(w * y as usize + x as usize) = triangle_color;
+                            //*depth_buffer.get_unchecked_mut(w * y as usize + x as usize) = depth;
+                            if (0..w).contains(&x) && (0..h).contains(&y) {
+                                image.pixels[w * y as usize + x as usize] = triangle_color;
+                                depth_buffer[w * y as usize + x as usize] = depth;
+                            }
                         }
                     };
                 }
@@ -409,8 +435,8 @@ fn process_model(
             }
         };
 
-        draw_line(a, b);
-        draw_line(b, c);
-        draw_line(c, a);
+        //draw_line(a, b);
+        //draw_line(b, c);
+        //draw_line(c, a);
     }
 }
