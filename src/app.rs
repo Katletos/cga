@@ -84,6 +84,7 @@ pub struct DickDrawingApp {
     input: InputState,
     model: ObjSet,
     camera_location: CameraLocation,
+    specular_texture: ColorImage,
 }
 
 impl DickDrawingApp {
@@ -96,12 +97,13 @@ impl DickDrawingApp {
 
         let model = wavefront_obj::obj::parse(
             //fs::read_to_string("teapot.obj").expect("Failed reading .obj file."),
-            fs::read_to_string("aboba/shovel/model.obj").expect("Failed reading .obj file."),
+            //fs::read_to_string("aboba/shovel/model.obj").expect("Failed reading .obj file."),
+            fs::read_to_string("aboba/ship/model.obj").expect("Failed reading .obj file."),
             //fs::read_to_string("plane.obj").expect("Failed reading .obj file."),
         )
         .expect("Error in parsing .obj format.");
 
-        let image_data = std::fs::read("aboba/shovel/diffuse.png").unwrap();
+        let image_data = std::fs::read("aboba/ship/diffuse.jpg").unwrap();
         //let image_data = std::fs::read("aboba/deck.png").unwrap();
         let image = image::load_from_memory(&image_data).unwrap();
         let image_buffer = image.to_rgba8();
@@ -109,13 +111,28 @@ impl DickDrawingApp {
         let texture_size = [image.width() as usize, image.height() as usize];
         let texture_color_image = ColorImage::from_rgba_unmultiplied(texture_size, image_buffer);
 
-        let normal_image_data = std::fs::read("aboba/shovel/normal.png").unwrap();
+        let normal_image_data = std::fs::read("aboba/ship/normal.jpg").unwrap();
         let normal_image = image::load_from_memory(&normal_image_data).unwrap();
         let normal_image_buffer = normal_image.to_rgba8();
         let normal_image_buffer = normal_image_buffer.as_raw();
-        let normal_texture_size = [normal_image.width() as usize, normal_image.height() as usize];
+        let normal_texture_size = [
+            normal_image.width() as usize,
+            normal_image.height() as usize,
+        ];
         let normal_texture_color_image =
             ColorImage::from_rgba_unmultiplied(normal_texture_size, normal_image_buffer);
+
+
+        let specular_image_data = std::fs::read("aboba/ship/specular.jpg").unwrap();
+        let specular_image = image::load_from_memory(&specular_image_data).unwrap();
+        let specular_image_buffer = specular_image.to_rgba8();
+        let specular_image_buffer = specular_image_buffer.as_raw();
+        let specular_texture_size = [
+            specular_image.width() as usize,
+            specular_image.height() as usize,
+        ];
+        let specular_texture_color_image =
+            ColorImage::from_rgba_unmultiplied(specular_texture_size, specular_image_buffer);
 
         DickDrawingApp {
             render_texture_canvas,
@@ -126,6 +143,7 @@ impl DickDrawingApp {
 
             diffuse_texture: texture_color_image,
             normal_texture: normal_texture_color_image,
+            specular_texture: specular_texture_color_image,
 
             global_light: Vector3::new(1.0, 1.0, 1.0).normalize(),
             render_options: RenderOptions::default(),
@@ -416,10 +434,13 @@ impl DickDrawingApp {
                             vertex_a,
                             vertex_b,
                             vertex_c,
-                            &mut |point, rgb, uv, tangent, depth| {
+                            &mut |point, rgb, uv, tangent, world_pos, depth| {
                                 let x = point.x;
                                 let y = point.y;
                                 if (0..w).contains(&x) && (0..h).contains(&y) {
+                                    let world_pos: Point3<f32> =
+                                        Point3::new(world_pos.0, world_pos.1, world_pos.2);
+
                                     let color = Color32::from_rgb(
                                         (rgb.0 * 255.0) as u8,
                                         (rgb.1 * 255.0) as u8,
@@ -438,6 +459,7 @@ impl DickDrawingApp {
 
                                     let diffuse_color = *self.diffuse_texture.index((tu, tv));
                                     let normal_texture = *self.normal_texture.index((tu, tv));
+                                    let specular_texture = *self.normal_texture.index((tu, tv));
 
                                     let normal_vector = if self.render_options.render_normal_map {
                                         let tangent = Vector3::new(tangent.0, tangent.1, tangent.2);
@@ -450,26 +472,34 @@ impl DickDrawingApp {
                                             (normal_texture.b() as f32 / 255.0) * 2.0 - 1.0,
                                         );
 
-                                        //let normal_from_texture = Vector3::new(0.0, 0.0, 1.0);
                                         tbn * normal_from_texture
                                     } else {
                                         normal
                                     };
 
-                                    let amount_of_light = normal_vector.dot(&self.global_light);
-                                    let color = Color32::from_gray((amount_of_light * 255.0) as u8);
 
-                                    //let triangle_color = normal_texture;
-                                    /* let triangle_color = Color32::from_rgb(
-                                        (normal_vector.x * 128.0) as u8,
-                                        (normal_vector.y * 128.0) as u8,
-                                        (normal_vector.z * 128.0) as u8,
-                                        ); */
+                                    let view_direction =
+                                        (world_pos - self.camera_location.world_pos).normalize();
+                                    let dot = normal_vector.dot(&self.global_light);
+                                    let caster = 1.0;
+                                    let color_f32 = diffuse_color.to_normalized_gamma_f32();
+                                    let color_f32 =
+                                        Vector3::new(color_f32[0], color_f32[1], color_f32[2]);
 
+                                    let ambient = color_f32 * 0.6;
+                                    let diffuse = color_f32 * 0.4 * dot.max(0.0) * caster;
+                                    let tmp_vec = -2.0 * dot * normal_vector;
+                                    let reflect_light = (self.global_light + tmp_vec).normalize();
+                                    let spec =
+                                        reflect_light.dot(&view_direction).max(0.0).powf(42.0);
+                                    let material_specular = specular_texture.r() as f32 / 255.0;
+                                    let specular = material_specular * color_f32 * spec;
+
+                                    let triangle_color = ambient + diffuse + specular;
                                     let triangle_color = Color32::from_rgb(
-                                        (diffuse_color.r() as f32 * amount_of_light) as u8,
-                                        (diffuse_color.g() as f32 * amount_of_light) as u8,
-                                        (diffuse_color.b() as f32 * amount_of_light) as u8,
+                                        (triangle_color.x * 255.0) as u8,
+                                        (triangle_color.y * 255.0) as u8,
+                                        (triangle_color.z * 255.0) as u8,
                                     );
 
                                     if self.buffer.depth_buffer[w * y as usize + x as usize] > depth

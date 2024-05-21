@@ -20,7 +20,6 @@ impl Vertex {
         tangent: Vector3<f32>,
         color: Color32,
         world_pos: Point3<f32>,
-
     ) -> Self {
         let [r, g, b, _a] = color.to_normalized_gamma_f32();
 
@@ -40,7 +39,7 @@ impl Vertex {
 }
 
 pub fn rasterize_triangle<
-    F: FnMut(Point2<usize>, (f32, f32, f32), (f32, f32, f32), (f32, f32, f32), f32),
+    F: FnMut(Point2<usize>, (f32, f32, f32), (f32, f32, f32), (f32, f32, f32), (f32, f32, f32), f32),
 >(
     mut p0: Vertex,
     mut p1: Vertex,
@@ -103,7 +102,9 @@ pub fn rasterize_triangle<
     }
 }
 
-fn scanline<F: FnMut(Point2<usize>, (f32, f32, f32), (f32, f32, f32), (f32, f32, f32), f32)>(
+fn scanline<
+    F: FnMut(Point2<usize>, (f32, f32, f32), (f32, f32, f32), (f32, f32, f32), (f32, f32, f32), f32),
+>(
     y: usize,
     left: &mut SlopeData,
     right: &mut SlopeData,
@@ -113,8 +114,8 @@ fn scanline<F: FnMut(Point2<usize>, (f32, f32, f32), (f32, f32, f32), (f32, f32,
     let endx = right.get_first() as usize;
     let num_steps = endx - x;
 
-    let (lr, lg, lb, lu, lv, lw, ltx, lty, ltz) = left.get_rgb_uvw();
-    let (rr, rg, rb, ru, rv, rw, rtx, rty, rtz) = right.get_rgb_uvw();
+    let (lr, lg, lb, lu, lv, lw, ltx, lty, ltz, lwx, lwy, lwz) = left.get_rgb_uvw();
+    let (rr, rg, rb, ru, rv, rw, rtx, rty, rtz, rwx, rwy, rwz) = right.get_rgb_uvw();
     let r = Slope::new(lr, rr, num_steps);
     let g = Slope::new(lg, rg, num_steps);
     let b = Slope::new(lb, rb, num_steps);
@@ -127,8 +128,12 @@ fn scanline<F: FnMut(Point2<usize>, (f32, f32, f32), (f32, f32, f32), (f32, f32,
     let t_y = Slope::new(lty, rty, num_steps);
     let t_z = Slope::new(ltz, rtz, num_steps);
 
+    let w_x = Slope::new(lwx, rwx, num_steps);
+    let w_y = Slope::new(lwy, rwy, num_steps);
+    let w_z = Slope::new(lwz, rwz, num_steps);
+
     let depth = Slope::new(left.get_depth(), right.get_depth(), num_steps);
-    let mut props = [r, g, b, u, v, w, depth, t_x, t_y, t_z];
+    let mut props = [r, g, b, u, v, w, depth, t_x, t_y, t_z, w_x, w_y, w_z];
 
     for x in (left.get_first() as usize)..(right.get_first() as usize) {
         f(
@@ -136,6 +141,7 @@ fn scanline<F: FnMut(Point2<usize>, (f32, f32, f32), (f32, f32, f32), (f32, f32,
             (props[0].get(), props[1].get(), props[2].get()),
             (props[3].get(), props[4].get(), props[5].get()),
             (props[7].get(), props[8].get(), props[9].get()),
+            (props[10].get(), props[11].get(), props[12].get()),
             props[6].get(),
         );
         for prop in &mut props {
@@ -173,7 +179,7 @@ impl Slope {
 
 #[derive(Debug, Default, Clone, Copy)]
 struct SlopeData {
-    data: [Slope; 11],
+    data: [Slope; 14],
 }
 
 impl SlopeData {
@@ -196,9 +202,14 @@ impl SlopeData {
         let t_y = Slope::new(from.tangent.y, to.tangent.y, num_steps);
         let t_z = Slope::new(from.tangent.z, to.tangent.z, num_steps);
 
+        let w_x = Slope::new(from.world_pos.x, to.world_pos.x, num_steps);
+        let w_y = Slope::new(from.world_pos.y, to.world_pos.y, num_steps);
+        let w_z = Slope::new(from.world_pos.z, to.world_pos.z, num_steps);
+
         SlopeData {
             data: [
-                slope_x, norm_x, norm_y, norm_z, uv_x, uv_y, uv_z, depth, t_x, t_y, t_z,
+                slope_x, norm_x, norm_y, norm_z, uv_x, uv_y, uv_z, depth, t_x, t_y, t_z, w_x, w_y,
+                w_z,
             ],
         }
     }
@@ -207,7 +218,7 @@ impl SlopeData {
         self.data[0].get()
     }
 
-    fn get_rgb_uvw(&self) -> (f32, f32, f32, f32, f32, f32, f32, f32, f32) {
+    fn get_rgb_uvw(&self) -> (f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32) {
         (
             self.data[1].get(),
             self.data[2].get(),
@@ -219,16 +230,14 @@ impl SlopeData {
             self.data[8].get(),
             self.data[9].get(),
             self.data[10].get(),
+            self.data[11].get(),
+            self.data[12].get(),
+            self.data[13].get(),
         )
     }
 
     fn get_depth(&self) -> f32 {
         self.data[7].get()
-    }
-
-    fn get_weird_depth(&self) -> f32 {
-        (self.data[7].get() + 1.0) / 2.0
-        //1.0
     }
 
     fn advance(&mut self) {
