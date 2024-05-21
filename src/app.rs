@@ -41,6 +41,8 @@ pub struct InputState {
 pub struct RenderOptions {
     render_verticies: bool,
     render_normal_map: bool,
+    ambient: f32,
+    diffuse: f32,
 }
 
 impl Default for RenderOptions {
@@ -48,6 +50,8 @@ impl Default for RenderOptions {
         RenderOptions {
             render_verticies: false,
             render_normal_map: true,
+            ambient: 0.2,
+            diffuse: 0.8,
         }
     }
 }
@@ -97,13 +101,13 @@ impl DickDrawingApp {
 
         let model = wavefront_obj::obj::parse(
             //fs::read_to_string("teapot.obj").expect("Failed reading .obj file."),
-            //fs::read_to_string("aboba/shovel/model.obj").expect("Failed reading .obj file."),
-            fs::read_to_string("aboba/ship/model.obj").expect("Failed reading .obj file."),
+            fs::read_to_string("aboba/shovel/model.obj").expect("Failed reading .obj file."),
+            //fs::read_to_string("aboba/ship/model.obj").expect("Failed reading .obj file."),
             //fs::read_to_string("plane.obj").expect("Failed reading .obj file."),
         )
         .expect("Error in parsing .obj format.");
 
-        let image_data = std::fs::read("aboba/ship/diffuse.jpg").unwrap();
+        let image_data = std::fs::read("aboba/shovel/diffuse.png").unwrap();
         //let image_data = std::fs::read("aboba/deck.png").unwrap();
         let image = image::load_from_memory(&image_data).unwrap();
         let image_buffer = image.to_rgba8();
@@ -111,7 +115,7 @@ impl DickDrawingApp {
         let texture_size = [image.width() as usize, image.height() as usize];
         let texture_color_image = ColorImage::from_rgba_unmultiplied(texture_size, image_buffer);
 
-        let normal_image_data = std::fs::read("aboba/ship/normal.jpg").unwrap();
+        let normal_image_data = std::fs::read("aboba/shovel/normal.png").unwrap();
         let normal_image = image::load_from_memory(&normal_image_data).unwrap();
         let normal_image_buffer = normal_image.to_rgba8();
         let normal_image_buffer = normal_image_buffer.as_raw();
@@ -123,7 +127,7 @@ impl DickDrawingApp {
             ColorImage::from_rgba_unmultiplied(normal_texture_size, normal_image_buffer);
 
 
-        let specular_image_data = std::fs::read("aboba/ship/specular.jpg").unwrap();
+        let specular_image_data = std::fs::read("aboba/shovel/specular.png").unwrap();
         let specular_image = image::load_from_memory(&specular_image_data).unwrap();
         let specular_image_buffer = specular_image.to_rgba8();
         let specular_image_buffer = specular_image_buffer.as_raw();
@@ -244,6 +248,13 @@ impl DickDrawingApp {
             ui.label(format!("Eye: {}", self.camera_location.world_pos));
             ui.checkbox(&mut self.render_options.render_verticies, "Render vertices");
             ui.checkbox(&mut self.render_options.render_normal_map, "Normal map");
+            ui.add(egui::Slider::new(&mut self.global_light.x, 0.0..=1.0).text("X"));
+            ui.add(egui::Slider::new(&mut self.global_light.y, 0.0..=1.0).text("Y"));
+            ui.add(egui::Slider::new(&mut self.global_light.z, 0.0..=1.0).text("Z"));
+
+            ui.add(egui::Slider::new(&mut self.render_options.ambient, 0.0..=1.0).text("Ambient: "));
+            ui.add(egui::Slider::new(&mut self.render_options.diffuse, 0.0..=1.0).text("Diffuse: "));
+            self.global_light = self.global_light.normalize();
         });
     }
 
@@ -315,8 +326,7 @@ impl DickDrawingApp {
         println!("haha funny rasteriizing");
         for object in &self.model.objects {
             for geometry in &object.geometry {
-                let mut tangents: HashMap<(usize, Option<usize>, Option<usize>), Vector3<f32>> =
-                    HashMap::default();
+                let mut tangents = vec![Vector3::default(); object.vertices.len()];
 
                 for shape in &geometry.shapes {
                     if let wavefront_obj::obj::Primitive::Triangle(ia, ib, ic) = shape.primitive {
@@ -337,22 +347,12 @@ impl DickDrawingApp {
                         let r = 1.0 / (delta_uv1.x * delta_uv2.y - delta_uv1.y * delta_uv2.x);
                         let tangent = (delta_pos1 * delta_uv2.y - delta_pos2 * delta_uv1.y) * r;
 
-                        // let bitangent = (delta_pos2 * delta_uv1.x - delta_pos1 * delta_uv2.x) * -r;
-                        tangents.insert(
-                            ia,
-                            (tangent + tangents.get(&ia).unwrap_or(&Vector3::default()))
-                                .normalize(),
-                        );
-                        tangents.insert(
-                            ib,
-                            (tangent + tangents.get(&ib).unwrap_or(&Vector3::default()))
-                                .normalize(),
-                        );
-                        tangents.insert(
-                            ic,
-                            (tangent + tangents.get(&ic).unwrap_or(&Vector3::default()))
-                                .normalize(),
-                        );
+                        tangents[ia.0] += tangent;
+                        tangents[ib.0] += tangent;
+                        tangents[ic.0] += tangent;
+                        tangents[ia.0] = tangents[ia.0].normalize();
+                        tangents[ib.0] = tangents[ib.0].normalize();
+                        tangents[ic.0] = tangents[ic.0].normalize();
                     }
                 }
 
@@ -382,9 +382,9 @@ impl DickDrawingApp {
                         let mut uv_b = to_uv3(object.tex_vertices[ib.1.unwrap()]);
                         let mut uv_c = to_uv3(object.tex_vertices[ic.1.unwrap()]);
 
-                        let ta = tangents[&ia];
-                        let tb = tangents[&ib];
-                        let tc = tangents[&ic];
+                        let ta = tangents[ia.0];
+                        let tb = tangents[ib.0];
+                        let tc = tangents[ic.0];
 
                         uv_a.z = aw;
                         uv_b.z = bw;
@@ -417,11 +417,6 @@ impl DickDrawingApp {
                         let vp_b = to_viewport(b);
                         let vp_c = to_viewport(c);
 
-                        let calc_light = |normal: Vector3<f32>, fragment: Vector3<f32>| {
-                            let light_direction = self.global_light;
-                            //let view_direction = self.camera_location.world_pos - fra
-                        };
-
                         if !is_visible_triangle(&a, &b, &c) {
                             continue;
                         }
@@ -441,14 +436,7 @@ impl DickDrawingApp {
                                     let world_pos: Point3<f32> =
                                         Point3::new(world_pos.0, world_pos.1, world_pos.2);
 
-                                    let color = Color32::from_rgb(
-                                        (rgb.0 * 255.0) as u8,
-                                        (rgb.1 * 255.0) as u8,
-                                        (rgb.2 * 255.0) as u8,
-                                    );
-
-                                    let mut normal = Vector3::new(rgb.0, rgb.1, rgb.2);
-
+                                    let normal = Vector3::new(rgb.0, rgb.1, rgb.2);
                                     let u = uv.0 / uv.2;
                                     let v = uv.1 / uv.2;
 
@@ -486,8 +474,8 @@ impl DickDrawingApp {
                                     let color_f32 =
                                         Vector3::new(color_f32[0], color_f32[1], color_f32[2]);
 
-                                    let ambient = color_f32 * 0.6;
-                                    let diffuse = color_f32 * 0.4 * dot.max(0.0) * caster;
+                                    let ambient = color_f32 * self.render_options.ambient;
+                                    let diffuse = color_f32 * self.render_options.diffuse * dot.max(0.0) * caster;
                                     let tmp_vec = -2.0 * dot * normal_vector;
                                     let reflect_light = (self.global_light + tmp_vec).normalize();
                                     let spec =
