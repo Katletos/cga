@@ -1,6 +1,11 @@
 use crate::bresenham::{Bresenham, Point};
-use crate::rendering::Camera;
+use crate::camera::{Camera, CameraLocation};
+use crate::obj_file::ObjModel;
 use crate::scanline::{rasterize_triangle, Vertex};
+use crate::triangle::ObjTriangle;
+use eframe::App;
+use egui::{Event, Pos2, Ui};
+use image::GenericImageView;
 use itertools::Itertools;
 use rayon::prelude::*;
 
@@ -9,340 +14,494 @@ use egui::{
     Margin, Rect, Sense, TextureId, TextureOptions, Vec2,
 };
 
-use nalgebra::{wrap, Isometry3, Matrix4, Perspective3, Point2, Point3, Vector3};
-use nalgebra_glm;
-use nalgebra_glm::Vec3;
-use obj::{load_obj, Obj};
+use nalgebra::{Isometry3, Matrix3, Perspective3, Point2, Point3, Vector3, Vector4};
 use rand::{thread_rng, Rng};
-use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator};
-use std::cmp::Ordering;
-use std::fs::File;
+use std::collections::HashMap;
+use std::fs::{self, File};
 use std::io::BufReader;
-use std::ops::RangeBounds;
-use std::time::Instant;
-use std::vec;
+use std::ops::Index;
+use std::time::{Duration, Instant};
+use std::{thread, vec};
+use wavefront::Obj;
 use wavefront_obj::obj::ObjSet;
 
-/// We derive Deserialize/Serialize so we can persist app state on shutdown.
-// #[derive(serde::Deserialize, serde::Serialize, Default)]
-// #[serde(default)]
+pub struct RenderBuffer {
+    pub image: ColorImage,
+    pub depth_buffer: Vec<f32>,
+}
+
+#[derive(Default)]
+pub struct InputState {
+    drag_start: Option<Pos2>,
+    drag_delta: Option<(f32, f32)>,
+    forward: bool,
+    backward: bool,
+}
+
+pub struct RenderOptions {
+    render_verticies: bool,
+    render_normal_map: bool,
+}
+
+impl Default for RenderOptions {
+    fn default() -> Self {
+        RenderOptions {
+            render_verticies: false,
+            render_normal_map: true,
+        }
+    }
+}
+
+impl RenderBuffer {
+    pub fn new(width: usize, height: usize) -> Self {
+        RenderBuffer {
+            image: ColorImage::new([width, height], Color32::BLACK),
+            depth_buffer: vec![f32::INFINITY; width * height],
+        }
+    }
+
+    pub fn resize_buffer(&mut self, width: usize, height: usize) {
+        if self.image.width() != width || self.image.height() != height {
+            self.image = ColorImage::new([width, height], Color32::BLACK);
+            self.depth_buffer.resize(width * height, f32::INFINITY);
+        }
+    }
+
+    pub fn reset_buffer(&mut self) {
+        self.image.pixels.fill(Color32::BLACK);
+        self.depth_buffer.fill(f32::INFINITY);
+    }
+}
+
 pub struct DickDrawingApp {
-    texture: TextureId,
-    depth_buffer: Vec<f32>,
-    obj: Option<Obj>,
-    obj2: Option<ObjSet>,
-    distance: f32,
-    angle: f32,
-    height: f32,
-    rasterize: bool,
-    points: Vec<Point2<f32>>,
-    vertices: Vec<usize>,
-    colors: Vec<Color32>,
-    model: wavefront::Obj,
-    model_points: Vec<Vertex>,
-    model_triangles: Vec<(usize, usize, usize)>,
-    triangle_colors: Vec<Color32>,
-    points_buf: Vec<Point3<f32>>,
-    normals_buf: Vec<Vector3<f32>>,
-    prev_light: Vector3<f32>,
-    light: Vector3<f32>,
-    pos: Point3<f32>,
-    pos_limit: f32,
+    render_texture_canvas: TextureId,
+    buffer: RenderBuffer,
+    render_options: RenderOptions,
+
+    global_light: Vector3<f32>,
+    diffuse_texture: ColorImage,
+    normal_texture: ColorImage,
+    input: InputState,
+    model: ObjSet,
+    camera_location: CameraLocation,
 }
 
 impl DickDrawingApp {
-    /// Called once before the first frame.
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // This is also where you can customize the look and feel of egui using
-        // `cc.egui_ctx.set_visuals` and `cc.egui_ctx.set_fonts`.
-
-        let texture = cc.egui_ctx.tex_manager().write().alloc(
+        let render_texture_canvas = cc.egui_ctx.tex_manager().write().alloc(
             "app".parse().unwrap(),
             ColorImage::default().into(),
             TextureOptions::NEAREST,
         );
 
-        //let model = wavefront::Obj::from_file("aboba/marcus.obj").unwrap();
-        let model = wavefront::Obj::from_file("teapot.obj").unwrap();
-        //let model = wavefront::Obj::from_file("Napoleon.obj").unwrap();
-        //let model = wavefront::Obj::from_file("aboba/model_2.obj").unwrap();
+        let model = wavefront_obj::obj::parse(
+            //fs::read_to_string("teapot.obj").expect("Failed reading .obj file."),
+            fs::read_to_string("aboba/shovel/model.obj").expect("Failed reading .obj file."),
+            //fs::read_to_string("plane.obj").expect("Failed reading .obj file."),
+        )
+        .expect("Error in parsing .obj format.");
 
-        let mut rng = thread_rng();
+        let image_data = std::fs::read("aboba/shovel/diffuse.png").unwrap();
+        //let image_data = std::fs::read("aboba/deck.png").unwrap();
+        let image = image::load_from_memory(&image_data).unwrap();
+        let image_buffer = image.to_rgba8();
+        let image_buffer = image_buffer.as_raw();
+        let texture_size = [image.width() as usize, image.height() as usize];
+        let texture_color_image = ColorImage::from_rgba_unmultiplied(texture_size, image_buffer);
 
-        let mut points = Vec::new();
-        let mut test_rasterizer_points = Vec::new();
-
-        let mut colors = Vec::new();
-
-        for i in 0..500 {
-            let x: f64 = rng.gen::<f64>() * 2.0f64 - 1.0f64;
-            let y: f64 = rng.gen::<f64>() * 2.0f64 - 1.0f64;
-            points.push(delaunator::Point { x, y });
-            test_rasterizer_points.push(Point2::new(x as f32, y as f32));
-        }
-
-        for i in 0..10000 {
-            colors.push(Color32::from_rgb(rng.gen(), rng.gen(), rng.gen()));
-        }
-
-        let triangles = delaunator::triangulate(&points);
-        let vertices = triangles.triangles;
-
-        let mut model_points = Vec::new();
-        for (kek) in model.positions().iter().zip_longest(model.normals()) {
-            match kek {
-                itertools::EitherOrBoth::Both(v, n) => {
-                    let vertex = v;
-                    let normal = *n;
-                    model_points.push(Vertex::new(
-                        Point3::from(*vertex),
-                        Vector3::from(normal),
-                        Color32::BLACK,
-                    ));
-                }
-                itertools::EitherOrBoth::Left(v) => {
-                    let vertex = v;
-                    let normal = [0.0; 3];
-                    model_points.push(Vertex::new(
-                        Point3::from(*vertex),
-                        Vector3::from(normal),
-                        Color32::BLACK,
-                    ));
-                }
-                itertools::EitherOrBoth::Right(_) => {}
-            }
-        }
-
-        let mut model_triangles = Vec::new();
-        let mut triangle_colors = Vec::new();
-
-        for [a, b, c] in model.triangles() {
-            let (a, b, c) = (a.position_index(), b.position_index(), c.position_index());
-            //let (an, bn, cn) = (a.position_index(), b.position_index(), c.position_index());
-            model_triangles.push((a, b, c));
-        }
-
-        for (a, b, c) in &model_triangles {
-            let (a, b, c) = (
-                model_points[*a].camera_view,
-                model_points[*b].camera_view,
-                model_points[*c].camera_view,
-            );
-            let ab = b - a;
-            let ac = c - a;
-            let normal = ab.cross(&ac).normalize();
-            let light = Vector3::new(0.5, 0.5, 0.5).normalize();
-            let amount_of_light = normal.dot(&light);
-            let color = Color32::from_gray((amount_of_light * 255.0) as u8);
-            triangle_colors.push(color);
-        }
+        let normal_image_data = std::fs::read("aboba/shovel/normal.png").unwrap();
+        let normal_image = image::load_from_memory(&normal_image_data).unwrap();
+        let normal_image_buffer = normal_image.to_rgba8();
+        let normal_image_buffer = normal_image_buffer.as_raw();
+        let normal_texture_size = [normal_image.width() as usize, normal_image.height() as usize];
+        let normal_texture_color_image =
+            ColorImage::from_rgba_unmultiplied(normal_texture_size, normal_image_buffer);
 
         DickDrawingApp {
-            pos: Point3::new(0.0, 0.0, 0.0),
-            pos_limit: 100.0,
+            render_texture_canvas,
+            buffer: RenderBuffer::new(1024, 576),
 
-            triangle_colors,
-            texture,
-            //obj: Some(obj),
-            obj: None,
-            obj2: None,
+            input: InputState::default(),
             model,
-            //obj2: Some(obj2),
-            distance: 3.0,
-            angle: 0.0,
-            height: 100.0f32,
-            rasterize: false,
-            light: Vector3::new(0.5, 0.5, 0.5),
-            prev_light: Vector3::new(0.5, 0.5, 0.5),
 
-            points: test_rasterizer_points,
-            vertices,
-            colors,
-            depth_buffer: Vec::new(),
-            model_points,
-            model_triangles,
+            diffuse_texture: texture_color_image,
+            normal_texture: normal_texture_color_image,
 
-            points_buf: Vec::new(),
-            normals_buf: Vec::new(),
+            global_light: Vector3::new(1.0, 1.0, 1.0).normalize(),
+            render_options: RenderOptions::default(),
+            camera_location: CameraLocation::new(
+                3.1415926535897932,
+                0.0,
+                Point3::new(0.0, 0.0, -10.0),
+            ),
         }
     }
 }
 
 impl eframe::App for DickDrawingApp {
-    /// Called by the frame work to save state before shutdown.
-    /* fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        eframe::set_value(storage, eframe::APP_KEY, self);
-    } */
-
     /// Called each time the UI needs repainting, which may be many times per second.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default()
             .frame(Frame::none())
             .show(ctx, |ui| {
-                let w = ui.clip_rect().width() as usize;
-                let h = ui.clip_rect().height() as usize;
-
-                let (response, painter) =
-                    ui.allocate_painter(ui.ctx().screen_rect().size(), Sense::drag());
-
-                let wh = [painter.clip_rect().width() as usize, painter.clip_rect().height() as usize];
-                dbg!(wh);
-
-                let camera = Camera::new(self.pos, self.distance, self.angle.to_radians(), self.height);
-
-                let far = 10.0;
-                let near = far / 100.0;
-                let perspective = Perspective3::new(w as f32/ h as f32, 60.0f32.to_radians(), 1.0, 1000.0);
-
+                let frame_time = Duration::from_secs_f32(1.0 / 60.0);
                 let start = Instant::now();
-                self.points_buf.clear();
-                self.normals_buf.clear();
-                let model = Isometry3::new(
-                    Vector3::new(0.0, 0.0, 0.0),
-                    Vector3::y() * std::f32::consts::FRAC_2_PI,
-                );
-                let model_view_projection = camera.look_at2 * model;
-
-                for vertex in &self.model_points {
-                    //let a = camera.look_at.transform_point(&Point3::from(*vertex));
-                    //self.points_buf.push(perspective.unproject_point(&a));
-                    let point = vertex.camera_view;
-                    let normal = vertex.norm;
-                    let to_push =
-                        perspective.unproject_point(&model_view_projection.transform_point(&point));
-                    let to_push_normal = model * normal;
-                    self.points_buf.push(to_push);
-                    self.normals_buf.push(to_push_normal);
+                self.controls(ctx, ui);
+                self.render_image(ctx, ui);
+                self.debug_window(ctx, ui);
+                let duration = start.elapsed();
+                if let Some(to_wait) = frame_time.checked_sub(duration) {
+                    thread::sleep(to_wait);
                 }
-
-                if self.prev_light != self.light {
-                    self.light = self.light.normalize();
-                    self.prev_light = self.light;
-
-                    self.triangle_colors.clear();
-                    for (a, b, c) in &self.model_triangles {
-                        let (a, b, c) = (
-                            self.model_points[*a].camera_view,
-                            self.model_points[*b].camera_view,
-                            self.model_points[*c].camera_view,
-                        );
-                        let ab = b - a;
-                        let ac = c - a;
-                        let normal = ab.cross(&ac).normalize();
-                        let amount_of_light = normal.dot(&self.light);
-                        let color = Color32::from_gray((amount_of_light * 255.0) as u8);
-                        self.triangle_colors.push(color);
-                    }
-                }
-
-                dbg!("Point transform", start.elapsed());
-                let mut image = ColorImage::new(wh, Color32::BLACK);
-                let mut image2 = ColorImage::new(wh, Color32::BLACK);
-                self.depth_buffer.fill(f32::INFINITY);
-
-                if self.depth_buffer.len() < image.pixels.len() {
-                    self.depth_buffer.resize(image.pixels.len(), f32::INFINITY);
-                }
-                let mut depth_buf2 = vec![f32::INFINITY; image.pixels.len()];
-
-                rayon::scope(|s| {
-                    s.spawn(|_| {
-                        process_model(
-                            &self.light,
-                            &mut image,
-                            &mut self.depth_buffer,
-                            &self.points_buf,
-                            &self.normals_buf,
-                            &self.model_triangles[0..self.model_triangles.len() / 2],
-                            &self.triangle_colors[0..self.model_triangles.len() / 2],
-                            w,
-                            h,
-                        );
-                    });
-                    s.spawn(|_| {
-                        process_model(
-                            &self.light,
-                            &mut image2,
-                            &mut depth_buf2,
-                            &self.points_buf,
-                            &self.normals_buf,
-                            &self.model_triangles[self.model_triangles.len() / 2..],
-                            &self.triangle_colors[self.model_triangles.len() / 2..],
-                            w,
-                            h,
-                        );
-                    });
-                });
-
-                (
-                    &mut image.pixels,
-                    &mut self.depth_buffer,
-                    &image2.pixels,
-                    &depth_buf2,
-                )
-                    .into_par_iter()
-                    .map(|(p1, d1, p2, d2)| {
-                        if d2 < d1 {
-                            *p1 = *p2;
-                        }
-                    })
-                    .count();
-
-                let mut cursor_x = 0.0;
-                let mut cursor_y = 0.0;
-
-                if let Some(pos) = ui.input(|x| x.pointer.hover_pos()) {
-                    cursor_x = pos.x;
-                    cursor_y = pos.y;
-                }
-
-                dbg!("Triangle render", start.elapsed());
-
-                egui::Window::new("Settings").show(ctx, |ui| {
-                    ui.add(egui::Slider::new(&mut self.distance, 0.0..=10.0).text("Distance"));
-                    ui.add(egui::Slider::new(&mut self.angle, 0.0..=360.0).text("Angle"));
-                    ui.add(egui::Slider::new(&mut self.height, -10.0..=10.0).text("Height"));
-
-                    ui.add(egui::Slider::new(&mut self.pos_limit, 10.0..=1000.0).text("Pos Limit"));
-                    ui.add(egui::Slider::new(&mut self.pos.x, -self.pos_limit..=self.pos_limit).text("Pos X"));
-                    ui.add(egui::Slider::new(&mut self.pos.y, -self.pos_limit..=self.pos_limit).text("Pos Y"));
-                    ui.add(egui::Slider::new(&mut self.pos.z, -self.pos_limit..=self.pos_limit).text("Pos Z"));
-
-                    if ui
-                        .button(format!("Rasterize: {}", self.rasterize))
-                        .clicked()
-                    {
-                        self.rasterize = !self.rasterize;
-                    }
-
-                    ui.add(egui::Slider::new(&mut self.light.x, -1.0..=1.0).text("Light X"));
-                    ui.add(egui::Slider::new(&mut self.light.y, -1.0..=1.0).text("Light Y"));
-                    ui.add(egui::Slider::new(&mut self.light.z, -1.0..=1.0).text("Light Z"));
-                });
-
-                ui.ctx().tex_manager().write().set(
-                    self.texture,
-                    ImageDelta::full(image, TextureOptions::LINEAR),
-                );
-
-                dbg!(painter.clip_rect());
-                painter.image(
-                    self.texture,
-                    painter.clip_rect(),
-                    Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                    Color32::WHITE,
-                );
-                dbg!("Frame finish", start.elapsed());
+                ctx.request_repaint();
             });
     }
 }
 
-fn load_obj_from_file(filename: &str) -> Obj {
-    let file = File::open(filename).expect("Can't open file");
-    let input = BufReader::new(file);
-    load_obj(input).expect("Can't load obj")
+impl DickDrawingApp {
+    fn controls(&mut self, _ctx: &egui::Context, ui: &mut Ui) {
+        ui.input(|input| {
+            /*
+            for event in &input.raw.events {
+                if let Event::Key { key, physical_key, pressed, repeat, modifiers } = event {
+                    if !repeat {
+                        match key.
+                    }
+                }
+            } */
+            let forward_pressed = input.key_pressed(egui::Key::W);
+            let forward_released = input.key_released(egui::Key::W);
+
+            let backward_pressed = input.key_pressed(egui::Key::S);
+            let backward_released = input.key_released(egui::Key::S);
+
+            if forward_pressed {
+                self.input.forward = true;
+            } else if forward_released {
+                self.input.forward = false;
+            }
+
+            if backward_pressed {
+                self.input.backward = true;
+            } else if backward_released {
+                self.input.backward = false;
+            }
+
+            if let (Some(drag_start), Some(interact_pos)) =
+                (self.input.drag_start, input.pointer.interact_pos())
+            {
+                let delta = drag_start - interact_pos;
+                self.input.drag_delta = Some((delta.x, delta.y));
+            } else {
+                self.input.drag_delta = None;
+            }
+
+            if input.pointer.primary_down() {
+                self.input.drag_start = input.pointer.interact_pos();
+            } else {
+                self.input.drag_start = None;
+            }
+        });
+
+        let speed = 0.1;
+        let mouse_speed = 0.01;
+        if self.input.forward {
+            self.camera_location.world_pos += self.camera_location.get_look_direction() * speed;
+        }
+
+        if self.input.backward {
+            self.camera_location.world_pos -= self.camera_location.get_look_direction() * speed;
+        }
+
+        if let Some((dx, dy)) = self.input.drag_delta {
+            self.camera_location.yaw += dx * mouse_speed;
+            self.camera_location.pitch += -dy * mouse_speed;
+        }
+    }
+
+    fn debug_window(&mut self, ctx: &egui::Context, ui: &mut Ui) {
+        egui::Window::new("Debug data").show(ctx, |ui| {
+            ui.label(format!("Pitch: {}", self.camera_location.pitch));
+            ui.label(format!("Yaw: {}", self.camera_location.yaw));
+            ui.label(format!("Eye: {}", self.camera_location.world_pos));
+            ui.checkbox(&mut self.render_options.render_verticies, "Render vertices");
+            ui.checkbox(&mut self.render_options.render_normal_map, "Normal map");
+        });
+    }
+
+    fn render_image(&mut self, ctx: &egui::Context, ui: &mut Ui) {
+        let (response, painter) = ui.allocate_painter(ui.ctx().screen_rect().size(), Sense::drag());
+
+        let w = painter.clip_rect().width() as usize;
+        let h = painter.clip_rect().height() as usize;
+
+        self.buffer.resize_buffer(w, h);
+        painter.image(
+            self.render_texture_canvas,
+            painter.clip_rect(),
+            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
+        self.buffer.reset_buffer();
+
+        let far = 1000.0;
+        let near = far / 100.0;
+        let projection = Perspective3::new(w as f32 / h as f32, 60.0f32.to_radians(), 1.0, 10000.0);
+
+        let camera = Camera::new(&self.camera_location);
+
+        let model = Isometry3::new(
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::y() * std::f32::consts::FRAC_2_PI,
+        );
+
+        let model_view = camera.look_at * model;
+
+        let to_screen_space = |vertex: Point3<f32>| {
+            let m4 = projection.as_matrix() * model_view.to_homogeneous();
+            let v = Vector4::new(vertex.x, vertex.y, vertex.z, 1.0);
+            let a = m4 * v;
+            let saved_v = a.w;
+            let a = a / saved_v;
+            (Point3::from(a.xyz()), saved_v)
+        };
+
+        let to_world_space = |normal: Vector3<f32>| model_view.transform_vector(&normal);
+        let to_world_space_p = |p: Point3<f32>| model_view.transform_point(&p);
+
+        let to_p3 = |v: wavefront_obj::obj::Vertex| Point3::new(v.x as f32, v.y as f32, v.z as f32);
+        let to_v3 =
+            |v: wavefront_obj::obj::Vertex| Vector3::new(v.x as f32, v.y as f32, v.z as f32);
+
+        let to_uv3 =
+            |v: wavefront_obj::obj::TVertex| Vector3::new(v.u as f32, v.v as f32, v.w as f32);
+
+        let to_viewport = |p: Point3<f32>| {
+            Point3::new(
+                (p.x + 1.0) * 0.5 * w as f32,
+                (1.0 - p.y) * 0.5 * h as f32,
+                p.z,
+            )
+        };
+
+        let in_bounds = |point: &Point3<f32>| {
+            (-1.0..1.0).contains(&point.x)
+                && (-1.0..1.0).contains(&point.y)
+                && (-1.0..1.0).contains(&point.z)
+        };
+
+        let is_visible_triangle = |p1: &Point3<f32>, p2: &Point3<f32>, p3: &Point3<f32>| {
+            in_bounds(p1) || in_bounds(p2) || in_bounds(p3)
+        };
+
+        println!("haha funny rasteriizing");
+        for object in &self.model.objects {
+            for geometry in &object.geometry {
+                let mut tangents: HashMap<(usize, Option<usize>, Option<usize>), Vector3<f32>> =
+                    HashMap::default();
+
+                for shape in &geometry.shapes {
+                    if let wavefront_obj::obj::Primitive::Triangle(ia, ib, ic) = shape.primitive {
+                        let pos0 = to_p3(object.vertices[ia.0]);
+                        let pos1 = to_p3(object.vertices[ib.0]);
+                        let pos2 = to_p3(object.vertices[ic.0]);
+
+                        let uv0 = to_uv3(object.tex_vertices[ia.1.unwrap()]);
+                        let uv1 = to_uv3(object.tex_vertices[ib.1.unwrap()]);
+                        let uv2 = to_uv3(object.tex_vertices[ic.1.unwrap()]);
+
+                        let delta_pos1 = pos1 - pos0;
+                        let delta_pos2 = pos2 - pos0;
+
+                        let delta_uv1 = uv1 - uv0;
+                        let delta_uv2 = uv2 - uv0;
+
+                        let r = 1.0 / (delta_uv1.x * delta_uv2.y - delta_uv1.y * delta_uv2.x);
+                        let tangent = (delta_pos1 * delta_uv2.y - delta_pos2 * delta_uv1.y) * r;
+
+                        // let bitangent = (delta_pos2 * delta_uv1.x - delta_pos1 * delta_uv2.x) * -r;
+                        tangents.insert(
+                            ia,
+                            (tangent + tangents.get(&ia).unwrap_or(&Vector3::default()))
+                                .normalize(),
+                        );
+                        tangents.insert(
+                            ib,
+                            (tangent + tangents.get(&ib).unwrap_or(&Vector3::default()))
+                                .normalize(),
+                        );
+                        tangents.insert(
+                            ic,
+                            (tangent + tangents.get(&ic).unwrap_or(&Vector3::default()))
+                                .normalize(),
+                        );
+                    }
+                }
+
+                for shape in &geometry.shapes {
+                    if let wavefront_obj::obj::Primitive::Triangle(ia, ib, ic) = shape.primitive {
+                        let av = to_p3(object.vertices[ia.0]);
+                        let bv = to_p3(object.vertices[ib.0]);
+                        let cv = to_p3(object.vertices[ic.0]);
+
+                        let (a, aw) = to_screen_space(av);
+                        let (b, bw) = to_screen_space(bv);
+                        let (c, cw) = to_screen_space(cv);
+
+                        if ((b - a).cross(&(c - a)).z).is_sign_negative() {
+                            continue;
+                        }
+
+                        let an = to_world_space(to_v3(object.normals[ia.2.unwrap()]));
+                        let bn = to_world_space(to_v3(object.normals[ib.2.unwrap()]));
+                        let cn = to_world_space(to_v3(object.normals[ic.2.unwrap()]));
+
+                        let a_world = to_world_space_p(av);
+                        let b_world = to_world_space_p(bv);
+                        let c_world = to_world_space_p(cv);
+
+                        let mut uv_a = to_uv3(object.tex_vertices[ia.1.unwrap()]);
+                        let mut uv_b = to_uv3(object.tex_vertices[ib.1.unwrap()]);
+                        let mut uv_c = to_uv3(object.tex_vertices[ic.1.unwrap()]);
+
+                        let ta = tangents[&ia];
+                        let tb = tangents[&ib];
+                        let tc = tangents[&ic];
+
+                        uv_a.z = aw;
+                        uv_b.z = bw;
+                        uv_c.z = cw;
+
+                        if self.render_options.render_verticies {
+                            for point_coords in [a, b, c] {
+                                if (-1.0..1.0).contains(&point_coords.z)
+                                    && (-1.0..1.0).contains(&point_coords.x)
+                                    && (-1.0..1.0).contains(&point_coords.y)
+                                {
+                                    let z = (point_coords.z + 1.0) / 2.0;
+                                    let radius = 10.0 / z;
+                                    dbg!(radius);
+                                    dbg!(point_coords);
+                                    painter.circle(
+                                        pos2(
+                                            (point_coords.x + 1.0) / 2.0 * w as f32,
+                                            (1.0 - point_coords.y) / 2.0 * h as f32,
+                                        ),
+                                        radius,
+                                        Color32::WHITE,
+                                        (1.0, Color32::YELLOW),
+                                    );
+                                }
+                            }
+                        }
+
+                        let vp_a = to_viewport(a);
+                        let vp_b = to_viewport(b);
+                        let vp_c = to_viewport(c);
+
+                        let calc_light = |normal: Vector3<f32>, fragment: Vector3<f32>| {
+                            let light_direction = self.global_light;
+                            //let view_direction = self.camera_location.world_pos - fra
+                        };
+
+                        if !is_visible_triangle(&a, &b, &c) {
+                            continue;
+                        }
+
+                        let vertex_a = Vertex::new(vp_a, an, uv_a, ta, Color32::YELLOW, a_world);
+                        let vertex_b = Vertex::new(vp_b, bn, uv_b, tb, Color32::YELLOW, b_world);
+                        let vertex_c = Vertex::new(vp_c, cn, uv_c, tc, Color32::YELLOW, c_world);
+
+                        rasterize_triangle(
+                            vertex_a,
+                            vertex_b,
+                            vertex_c,
+                            &mut |point, rgb, uv, tangent, depth| {
+                                let x = point.x;
+                                let y = point.y;
+                                if (0..w).contains(&x) && (0..h).contains(&y) {
+                                    let color = Color32::from_rgb(
+                                        (rgb.0 * 255.0) as u8,
+                                        (rgb.1 * 255.0) as u8,
+                                        (rgb.2 * 255.0) as u8,
+                                    );
+
+                                    let mut normal = Vector3::new(rgb.0, rgb.1, rgb.2);
+
+                                    let u = uv.0 / uv.2;
+                                    let v = uv.1 / uv.2;
+
+                                    let (tu, tv) = (
+                                        ((u * 4094.0) as usize).clamp(0, 4095),
+                                        (((1.0 - v) * 4094.0) as usize).clamp(0, 4095),
+                                    );
+
+                                    let diffuse_color = *self.diffuse_texture.index((tu, tv));
+                                    let normal_texture = *self.normal_texture.index((tu, tv));
+
+                                    let normal_vector = if self.render_options.render_normal_map {
+                                        let tangent = Vector3::new(tangent.0, tangent.1, tangent.2);
+                                        let bitan = normal.cross(&tangent);
+                                        let tbn = Matrix3::from_columns(&[tangent, bitan, normal]);
+
+                                        let normal_from_texture = Vector3::new(
+                                            (normal_texture.r() as f32 / 255.0) * 2.0 - 1.0,
+                                            (normal_texture.g() as f32 / 255.0) * 2.0 - 1.0,
+                                            (normal_texture.b() as f32 / 255.0) * 2.0 - 1.0,
+                                        );
+
+                                        //let normal_from_texture = Vector3::new(0.0, 0.0, 1.0);
+                                        tbn * normal_from_texture
+                                    } else {
+                                        normal
+                                    };
+
+                                    let amount_of_light = normal_vector.dot(&self.global_light);
+                                    let color = Color32::from_gray((amount_of_light * 255.0) as u8);
+
+                                    //let triangle_color = normal_texture;
+                                    /* let triangle_color = Color32::from_rgb(
+                                        (normal_vector.x * 128.0) as u8,
+                                        (normal_vector.y * 128.0) as u8,
+                                        (normal_vector.z * 128.0) as u8,
+                                        ); */
+
+                                    let triangle_color = Color32::from_rgb(
+                                        (diffuse_color.r() as f32 * amount_of_light) as u8,
+                                        (diffuse_color.g() as f32 * amount_of_light) as u8,
+                                        (diffuse_color.b() as f32 * amount_of_light) as u8,
+                                    );
+
+                                    if self.buffer.depth_buffer[w * y as usize + x as usize] > depth
+                                    {
+                                        unsafe {
+                                            // image.pixels.get_unchecked_mut(w * y as usize + x as usize) = triangle_color;
+                                            // depth_buffer.get_unchecked_mut(w * y as usize + x as usize) = depth;
+                                            if (0..w).contains(&x) && (0..h).contains(&y) {
+                                                self.buffer.image.pixels
+                                                    [w * y as usize + x as usize] = triangle_color;
+                                                self.buffer.depth_buffer
+                                                    [w * y as usize + x as usize] = depth;
+                                            }
+                                        }
+                                    };
+                                }
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        println!("finished raster :-)))))))))");
+
+        ui.ctx().tex_manager().write().set(
+            self.render_texture_canvas,
+            ImageDelta::full(self.buffer.image.clone(), TextureOptions::LINEAR),
+        );
+    }
 }
 
+/*
 fn process_model(
     light: &Vector3<f32>,
     image: &mut ColorImage,
@@ -355,14 +514,9 @@ fn process_model(
     h: usize,
 ) {
     for (i, ind) in triangles.iter().enumerate() {
-        let (ai, bi, ci) = ind;
-        let a = &points[*ai];
-        let b = &points[*bi];
-        let c = &points[*ci];
-        let na = &normals[*ai];
-        let nb = &normals[*bi];
-        let nc = &normals[*ci];
-
+        let a = todo!();
+        let b = todo!();
+        let c = todo!();
         if (b - a).cross(&(c - a)).z < 0.0 {
             continue;
         }
@@ -404,34 +558,6 @@ fn process_model(
             //let face_normal = (na + nb + nc).normalize();
             let triangle_color = triangle_colors[i];
 
-            rasterize_triangle(vertex_a, vertex_b, vertex_c, &mut |point, rgb, depth| {
-                let x = point.x;
-                let y = point.y;
-                if (0..w).contains(&x) && (0..h).contains(&y) {
-                    let color = Color32::from_rgb(
-                        (rgb.0 * 255.0) as u8,
-                        (rgb.1 * 255.0) as u8,
-                        (rgb.2 * 255.0) as u8,
-                    );
-                    let color = triangle_color;
-                    let mut normal = Vector3::new(rgb.0, rgb.1, rgb.2);
-
-                    let amount_of_light = normal.dot(&light);
-                    let color = Color32::from_gray((amount_of_light * 255.0) as u8);
-                    let triangle_color = color;
-
-                    if depth_buffer[w * y as usize + x as usize] > depth {
-                        unsafe {
-                            //*image.pixels.get_unchecked_mut(w * y as usize + x as usize) = triangle_color;
-                            //*depth_buffer.get_unchecked_mut(w * y as usize + x as usize) = depth;
-                            if (0..w).contains(&x) && (0..h).contains(&y) {
-                                image.pixels[w * y as usize + x as usize] = triangle_color;
-                                depth_buffer[w * y as usize + x as usize] = depth;
-                            }
-                        }
-                    };
-                }
-            });
         }
 
         let mut draw_line = |p1, p2| {
@@ -453,3 +579,4 @@ fn process_model(
         //draw_line(c, a);
     }
 }
+*/

@@ -7,7 +7,6 @@ edition = "2021"
 
 [dependencies]
 wavefront_obj = "10.0.0"
-obj-rs = { version = "0.7.1", features = ["glium"] }
 egui = "0.25.0"
 serde = "1.0.196"
 eframe = { version = "0.25.0", default-features = false, features = [
@@ -23,6 +22,7 @@ rand = "0.8.5"
 wavefront = "0.2.3"
 rayon = "1.10.0"
 itertools = "0.12.1"
+image = "0.25.1"
 
 [profile.release]
 # lto = true

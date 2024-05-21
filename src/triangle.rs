@@ -1,6 +1,6 @@
 pub struct ObjTriangle {
-    points: [usize; 3],
-    normals: [usize; 3],
-    texture_coords: [usize; 3],
-    material: usize,
+    pub points: [u32; 3],
+    pub normals: [u32; 3],
+    pub texture_coords: [u32; 3],
+    pub material: u32,
 }
