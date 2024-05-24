@@ -39,7 +39,16 @@ impl Vertex {
 }
 
 pub fn rasterize_triangle<
-    F: FnMut(Point2<usize>, (f32, f32, f32), (f32, f32, f32), (f32, f32, f32), (f32, f32, f32), f32),
+    F: FnMut(
+        Point2<isize>,
+        (f32, f32, f32),
+        (f32, f32, f32),
+        (f32, f32, f32),
+        (f32, f32, f32),
+        (f32, f32, f32),
+        (f32, f32, f32),
+        f32,
+    ),
 >(
     mut p0: Vertex,
     mut p1: Vertex,
@@ -75,27 +84,19 @@ pub fn rasterize_triangle<
     let shortside = (y1 - y0) * (x2 - x0) < (x1 - x0) * (y2 - y0);
     let mut sides: [_; 2] = [SlopeData::default(); 2];
 
-    sides[(!shortside) as usize] = SlopeData::new(&p0, &p2, (y2 - y0) as usize);
+    sides[(!shortside) as usize] = SlopeData::new(&p0, &p2, (y2 - y0) as f32);
 
     if y0 < y1 {
-        sides[shortside as usize] = SlopeData::new(&p0, &p1, (y1 - y0) as usize);
-        if y1 - y0 > 10000.0 {
-            dbg!(y0, y1);
-            panic!("what the fuck");
-        }
-        for y in (y0 as usize)..(y1 as usize) {
+        sides[shortside as usize] = SlopeData::new(&p0, &p1, (y1 - y0) as f32);
+        for y in (y0 as isize)..(y1 as isize) {
             let [s0, s1] = &mut sides;
             scanline(y, s0, s1, f);
         }
     }
 
     if y1 < y2 {
-        sides[shortside as usize] = SlopeData::new(&p1, &p2, (y2 - y1) as usize);
-        if y2 - y1 > 10000.0 {
-            dbg!(y2, y1);
-            panic!("what the fuck2");
-        }
-        for y in (y1 as usize)..(y2 as usize) {
+        sides[shortside as usize] = SlopeData::new(&p1, &p2, (y2 - y1) as f32);
+        for y in (y1 as isize)..(y2 as isize) {
             let [s0, s1] = &mut sides;
             scanline(y, s0, s1, f);
         }
@@ -103,19 +104,29 @@ pub fn rasterize_triangle<
 }
 
 fn scanline<
-    F: FnMut(Point2<usize>, (f32, f32, f32), (f32, f32, f32), (f32, f32, f32), (f32, f32, f32), f32),
+    F: FnMut(
+        Point2<isize>,
+        (f32, f32, f32),
+        (f32, f32, f32),
+        (f32, f32, f32),
+        (f32, f32, f32),
+        (f32, f32, f32),
+        (f32, f32, f32),
+        f32,
+    ),
 >(
-    y: usize,
+    y: isize,
     left: &mut SlopeData,
     right: &mut SlopeData,
     f: &mut F,
 ) {
-    let x = left.get_first() as usize;
-    let endx = right.get_first() as usize;
+    let x = left.get_first();
+    let endx = right.get_first();
     let num_steps = endx - x;
 
     let (lr, lg, lb, lu, lv, lw, ltx, lty, ltz, lwx, lwy, lwz) = left.get_rgb_uvw();
     let (rr, rg, rb, ru, rv, rw, rtx, rty, rtz, rwx, rwy, rwz) = right.get_rgb_uvw();
+
     let r = Slope::new(lr, rr, num_steps);
     let g = Slope::new(lg, rg, num_steps);
     let b = Slope::new(lb, rb, num_steps);
@@ -123,6 +134,35 @@ fn scanline<
     let u = Slope::new(lu, ru, num_steps);
     let v = Slope::new(lv, rv, num_steps);
     let w = Slope::new(lw, rw, num_steps);
+
+    let mut nextx_u = u.clone();
+    let step_size = 0.5;
+    nextx_u.advance_n(-step_size);
+    let mut nextx_v = v.clone();
+    nextx_v.advance_n(-step_size);
+    let mut nextx_w = w.clone();
+    nextx_w.advance_n(-step_size);
+
+    let mut next_left = left.clone();
+    next_left.advance_n(-step_size);
+    let mut next_right = right.clone();
+    next_right.advance_n(-step_size);
+
+    let mut new_num_steps = next_right.get_first() - next_left.get_first();
+
+    let new_x = next_left.get_first();
+    let line_delta = left.get_first() - new_x;
+
+    let (_, _, _, newy_lu, newy_lv, newy_lw, _, _, _, _, _, _) = next_left.get_rgb_uvw();
+    let (_, _, _, newy_ru, newy_rv, newy_rw, _, _, _, _, _, _) = next_right.get_rgb_uvw();
+
+    let mut nexty_u = Slope::new(newy_lu, newy_ru, new_num_steps);
+    let mut nexty_v = Slope::new(newy_lv, newy_rv, new_num_steps);
+    let mut nexty_w = Slope::new(newy_lw, newy_rw, new_num_steps);
+
+    nexty_u.advance_n(line_delta);
+    nexty_v.advance_n(line_delta);
+    nexty_w.advance_n(line_delta);
 
     let t_x = Slope::new(ltx, rtx, num_steps);
     let t_y = Slope::new(lty, rty, num_steps);
@@ -133,21 +173,27 @@ fn scanline<
     let w_z = Slope::new(lwz, rwz, num_steps);
 
     let depth = Slope::new(left.get_depth(), right.get_depth(), num_steps);
-    let mut props = [r, g, b, u, v, w, depth, t_x, t_y, t_z, w_x, w_y, w_z];
+    let mut props = [
+        r, g, b, u, v, w, depth, t_x, t_y, t_z, w_x, w_y, w_z, nextx_u, nextx_v, nextx_w, nexty_u,
+        nexty_v, nexty_w,
+    ];
 
-    for x in (left.get_first() as usize)..(right.get_first() as usize) {
+    for x in (left.get_first() as isize)..(right.get_first() as isize) {
         f(
             Point2::new(x, y),
             (props[0].get(), props[1].get(), props[2].get()),
             (props[3].get(), props[4].get(), props[5].get()),
             (props[7].get(), props[8].get(), props[9].get()),
             (props[10].get(), props[11].get(), props[12].get()),
+            (props[13].get(), props[14].get(), props[15].get()),
+            (props[16].get(), props[17].get(), props[18].get()),
             props[6].get(),
         );
         for prop in &mut props {
             prop.advance();
         }
     }
+
     left.advance();
     right.advance();
 }
@@ -159,7 +205,7 @@ struct Slope {
 }
 
 impl Slope {
-    fn new(begin: f32, end: f32, num_steps: usize) -> Slope {
+    fn new(begin: f32, end: f32, num_steps: f32) -> Slope {
         let inv_step = 1.0 / num_steps as f32;
         Slope {
             begin: begin as f32,
@@ -169,6 +215,10 @@ impl Slope {
 
     fn advance(&mut self) {
         self.begin += self.step_size;
+    }
+
+    fn advance_n(&mut self, n: f32) {
+        self.begin += self.step_size * n;
     }
 
     #[inline]
@@ -183,7 +233,7 @@ struct SlopeData {
 }
 
 impl SlopeData {
-    fn new(from: &Vertex, to: &Vertex, num_steps: usize) -> Self {
+    fn new(from: &Vertex, to: &Vertex, num_steps: f32) -> Self {
         let depth_from = from.uv.z;
         let depth_to = to.uv.z;
         let slope_x = Slope::new(from.camera_view.x, to.camera_view.x, num_steps);
@@ -243,6 +293,18 @@ impl SlopeData {
     fn advance(&mut self) {
         for slope in &mut self.data {
             slope.advance()
+        }
+    }
+
+    fn advance_back(&mut self) {
+        for slope in &mut self.data {
+            slope.advance_n(-1.0);
+        }
+    }
+
+    fn advance_n(&mut self, n: f32) {
+        for slope in &mut self.data {
+            slope.advance_n(n);
         }
     }
 }

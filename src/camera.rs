@@ -1,4 +1,4 @@
-use nalgebra::{Isometry3, Matrix4, Point3, Vector3};
+use nalgebra::{Isometry3, Point3, Vector3};
 
 pub struct CameraLocation {
     pub pitch: f32,

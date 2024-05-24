@@ -8,8 +8,6 @@ pub mod obj_file;
 use egui::vec2;
 
 use crate::app::DickDrawingApp;
-use std::fs::File;
-use std::io::BufReader;
 
 fn main() {
     let native_options = eframe::NativeOptions {
